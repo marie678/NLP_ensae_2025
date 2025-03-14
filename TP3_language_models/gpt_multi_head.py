@@ -11,7 +11,8 @@ learning_rate = 1e-3
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 eval_iters = 200
 n_embd = 32
-
+n_head = 4
+dropout = 0.2
 
 # ------------
 
@@ -74,6 +75,7 @@ class Head(nn.Module):
         self.value =  nn.Linear(n_embd, head_size)
         ###
         self.register_buffer('tril', torch.tril(torch.ones(block_size, block_size)))
+        self.dropout = nn.Dropout(dropout)
 
     def forward(self, x):
         B,T,C = x.shape
@@ -87,11 +89,62 @@ class Head(nn.Module):
         weights = weights.masked_fill(self.tril[:T, :T]== 0, float('-inf'))
         # apply the softmax
         weights = torch.softmax(weights, dim=-1)
+        weights = self.dropout(weights)
         ###
 
         out = weights @ v # (B, T, T) @ (B, T, C) -> (B, T, C)
         return out
 
+class MultiHeadAttention(nn.Module):
+    """ multiple heads of self-attention in parallel """
+
+    def __init__(self, num_heads, head_size):
+        super().__init__()
+        ## YOUR CODE HERE
+        ## list of num_heads modules of type Head
+        self.heads = nn.ModuleList([Head(head_size) for _ in range(num_heads)])
+        self.dropout = nn.Dropout(dropout)
+        ###
+
+    def forward(self, x):
+        ## YOUR CODE HERE
+        ## apply each head in self.heads to x and concat the results 
+        out = torch.cat([h(x) for h in self.heads], dim=-1)
+        out = self.dropout(out)
+
+        return out
+
+class FeedForward(nn.Module):
+    """ a simple MLP with RELU """
+
+    def __init__(self, n_embd):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(n_embd, n_embd),
+            nn.ReLU(),
+            nn.Dropout(dropout)
+        )
+
+    def forward(self, x):
+        return self.net(x)
+
+class Block(nn.Module):
+    """ A single bloc of multi-head attention """
+
+    def __init__(self, n_embd, n_head):
+        super().__init__()
+        head_size = n_embd // n_head
+        self.sa = MultiHeadAttention(n_head, head_size)
+        self.ffwd = FeedForward(n_embd)
+        self.ln1 = nn.LayerNorm(n_embd)
+        self.ln2 = nn.LayerNorm(n_embd)
+
+    def forward(self, x):
+        # x = self.sa(x)
+        # x = self.ffwd(x)
+        x = x + self.sa(self.ln1(x))
+        x = x + self.ffwd(self.ln2(x))
+        return x
 
 class BigramLanguageModel(nn.Module):
 
@@ -99,8 +152,16 @@ class BigramLanguageModel(nn.Module):
         super().__init__()
         self.token_embedding_table = nn.Embedding(vocab_size, n_embd)
         self.position_embedding_table = nn.Embedding(block_size, n_embd)
-        self.sa_head = Head(n_embd)
+        # self.sa_head = MultiHeadAttention(head_size=n_embd//n_head, num_heads=n_head)
+        # self.feedforward = FeedForward(n_embd=n_embd)
+        self.blocks = nn.Sequential(
+            Block(n_embd, n_head=n_head),
+            Block(n_embd, n_head=n_head),
+            Block(n_embd, n_head=n_head),
+        )
         self.lm_head = nn.Linear(n_embd, vocab_size)
+        self.ln = nn.LayerNorm(n_embd)
+
 
     def forward(self, idx, targets=None):
         B, T = idx.shape
@@ -109,7 +170,10 @@ class BigramLanguageModel(nn.Module):
         tok_emb = self.token_embedding_table(idx) # (B,T,C)
         pos_emb = self.position_embedding_table(torch.arange(T, device=device)) # (T,C)
         x = tok_emb + pos_emb # (B,T,C)
-        x = self.sa_head(x) # (B,T,C)
+        # x = self.sa_head(x) # (B,T,C)
+        # x = self.feedforward(x)
+        x = self.blocks(x)
+        x = self.ln(x)
         logits = self.lm_head(x) # (B,T,vocab_size)
 
         if targets is None:
